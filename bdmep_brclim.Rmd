@@ -1,0 +1,200 @@
+---
+title: "BDMEP and brclim comparison"
+author: "Raphael Saldanha"
+date: "2023-03-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(duckdb)
+library(arrow)
+library(viridis)
+```
+
+## Data load
+
+```{r}
+bdmep_conn <- dbConnect(
+  duckdb::duckdb(), 
+  dbdir = "bdmep.duckdb", 
+  read_only = TRUE
+)
+```
+
+```{r}
+brdwgd_conn <- dbConnect(
+  duckdb::duckdb(), 
+  dbdir = "../brclim/db/job_brdwgd_br_19610101_20200731.duckdb", 
+  read_only = TRUE
+)
+```
+
+```{r}
+capitals_names <- data.frame(
+  code_muni = c(1200401, 2704302, 1600303, 1302603, 2927408, 2304400,
+                5300108, 3205309, 5208707, 2111300, 5103403, 5002704,
+                3106200, 1501402, 2507507, 4106902, 2611606, 2211001,
+                3304557, 2408102, 4314902, 1100205, 1400100, 4205407,
+                3550308, 2800308, 1721000),
+  name_muni = c("Rio Branco, AC", "Maceió, AL", "Macapá, AP", "Manaus, AM",
+                "Salvador, BA", "Fortaleza, CE", "Brasilia, DF", "Vitória, ES",
+                "Goiânia, GO", "São Luís, MA", "Cuiabá, MT", "Campo Grande? MS",
+                "Belo Horizonte, MG", "Belém, PA", "João Pessoa, PB", "Curitiba, PR",
+                "Recife, PE", "Teresina, PI", "Rio de Janeiro, RJ", "Natal, RN",
+                "Porto Alegre, RS", "Porto Velho, RO", "Boa Vista, RR", "Florianópolis, SC",
+                "São Paulo, SP", "Aracaju, SE", "Palmas, TO")
+)
+```
+
+
+## Functions
+
+```{r}
+bdmep_data <- function(mun_code, date_start, date_end){
+  tbl(bdmep_conn, "daily_data") %>%
+    filter(code_muni == mun_code) %>%
+    filter(date >= date_start & date <= date_end) %>%
+    select(station_cod, date, prec_tot, temp_max, temp_min) %>%
+    group_by(date) %>%
+    summarise(
+      prec = ifelse(sum(prec_tot, na.rm = TRUE) > 10, TRUE, FALSE),
+      temp_max = mean(temp_max, na.rm = TRUE),
+      temp_min = mean(temp_min, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    arrange(date) %>%
+    collect()
+}
+```
+
+```{r}
+brdwgd_data <- function(mun_code, date_start, date_end){
+  tmp_tmax <- tbl(brdwgd_conn, "Tmax") %>%
+    filter(code_muni == mun_code) %>%
+    filter(name == "Tmax_mean") %>%
+    collect() %>%
+    filter(date >= date_start & date <= date_end) %>%
+    arrange(date) %>%
+    select(date, tmax = value)
+    
+  
+  tmp_tmin <- tbl(brdwgd_conn, "Tmin") %>%
+    filter(code_muni == mun_code) %>%
+    filter(name == "Tmin_mean") %>%
+    collect() %>%
+    filter(date >= date_start & date <= date_end) %>%
+    arrange(date) %>%
+    select(tmin = value)
+
+  tmp_pr <- tbl(brdwgd_conn, "pr") %>%
+    filter(code_muni == mun_code) %>%
+    filter(name == "pr_sum") %>%
+    collect() %>%
+    filter(date >= date_start & date <= date_end) %>%
+    arrange(date) %>%
+    select(pr = value) %>%
+    mutate(pr = ifelse(pr >= 10, TRUE, FALSE))
+
+  res <- bind_cols(tmp_tmax, tmp_tmin, tmp_pr)
+  
+  return(res)
+}
+```
+
+## Arguments
+
+```{r}
+capitals <- c(1100205, 1302603, 1200401, 5002704, 1600303,
+              5300108, 1400100, 5103403, 1721000, 3550308,
+              2211001, 3304557, 1501402, 5208707, 2927408,
+              4205407, 2111300, 2704302, 4314902, 4106902,
+              3106200, 2304400, 2611606, 2507507, 2800308,
+              2408102, 3205309)
+
+date_start <- as.Date("2000-01-01")
+date_end <- as.Date("2021-01-01")
+```
+
+
+## Collect data
+
+```{r}
+capitals_data <- tibble()
+
+for(mun_code in capitals){
+  res_bdmep <- bdmep_data(
+    mun_code = mun_code, 
+    date_start = date_start,
+    date_end = date_end
+  )
+  
+  res_brdwgd <- brdwgd_data(
+    mun_code = mun_code, 
+    date_start = date_start,
+    date_end = date_end
+  )
+  
+  tmp_tmax <- res_bdmep %>%
+    select(date, bdmep = temp_max) %>%
+    right_join(res_brdwgd %>% select(date, brdwgd = tmax), by = "date") %>%
+    na.omit() %>%
+    mutate(
+      name = "tmax",
+      code_muni = mun_code
+    )
+
+  tmp_tmin <- res_bdmep %>%
+    select(date, bdmep = temp_min) %>%
+    right_join(res_brdwgd %>% select(date, brdwgd = tmin), by = "date") %>%
+    na.omit() %>%
+    mutate(
+      name = "tmin",
+      code_muni = mun_code
+    )
+  
+  tmp_prec <- res_bdmep %>%
+    select(date, bdmep = prec) %>%
+    right_join(res_brdwgd %>% select(date, brdwgd = pr), by = "date") %>%
+    na.omit() %>%
+    mutate(
+      name = "prec",
+      code_muni = mun_code
+    )
+  
+  capitals_data <- bind_rows(capitals_data, tmp_tmax, tmp_tmin, tmp_prec)
+}
+```
+
+## Max Temperature
+
+```{r}
+p <- ggplot(
+  data = capitals_data %>% filter(name %in% c("tmax")) %>% left_join(capitals_names, by = "code_muni"), 
+  aes(x = bdmep, y = brdwgd)
+) +
+  geom_point(aes(color = date), alpha = .1) +
+  geom_smooth(method = "lm", alpha = .1, lty = 2, color = "gray30") +
+  scale_color_viridis(trans = "date", option = "plasma") +
+  theme_bw() +
+  labs(title = "Maximun temperature", 
+       color = "") +
+  facet_wrap(~ name_muni, scales = "free", ncol = 3) +
+  theme(legend.position="bottom")
+
+ggsave(filename = "temperature.pdf", plot = p, width = 210, height = 297, units = "mm", limitsize = FALSE)
+```
+
+
+
+
+
+
+
